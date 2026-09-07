@@ -24,6 +24,7 @@ const localViewTestCases: LocalViewTestCase[] = [
   {
     label: "error",
     viewModel: {
+      canRetry: false,
       details: "The local service failed to start.",
       kind: "error",
       logText: "Failed to bind port",
@@ -70,6 +71,7 @@ describe("local desktop views", () => {
   it("renders startup error logs without terminal control sequences", () => {
     const html = decodeLocalViewHtml({
       viewModel: {
+        canRetry: false,
         details: "The local service failed to start.",
         kind: "error",
         logText:
@@ -84,5 +86,36 @@ describe("local desktop views", () => {
     expect(html).toContain("Error: listen EADDRINUSE");
     expect(html).not.toContain("\x1b[");
     expect(html).not.toContain("\r");
+  });
+
+  it("offers a retry button when the failure is worth retrying", () => {
+    const html = decodeLocalViewHtml({
+      viewModel: {
+        canRetry: true,
+        details: "The bb server at https://bb.example.com did not answer.",
+        kind: "error",
+        logText: "",
+        title: "Could not reach this bb server",
+      },
+    });
+
+    expect(html).toContain(
+      '<button type="button" data-local-view-action="retry-server" data-testid="bb-local-view-retry">Try again</button>',
+    );
+  });
+
+  it("omits the retry button when retrying cannot help", () => {
+    const html = decodeLocalViewHtml({
+      viewModel: {
+        canRetry: false,
+        details: "Port 38886 is already in use by another program.",
+        kind: "error",
+        logText: "",
+        title: "Port conflict",
+      },
+    });
+
+    expect(html).not.toContain("data-local-view-action");
+    expect(html).not.toContain("<button");
   });
 });

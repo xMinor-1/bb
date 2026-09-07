@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppCommandId } from "@bb/domain";
 import type {
   BbDesktopApi,
@@ -145,6 +145,8 @@ interface EmitIpcPayloadArgs {
 async function loadPreload(): Promise<BbDesktopApi> {
   electronMock.reset();
   vi.resetModules();
+  vi.stubGlobal("window", { addEventListener: (): void => {} });
+  vi.stubGlobal("document", { querySelector: (): null => null });
   process.env.BB_DESKTOP_VERSION = "0.0.0-test";
   await import("../src/preload.js");
   const api = electronMock.exposedApi;
@@ -171,6 +173,10 @@ describe("desktop preload browser API", () => {
   beforeEach(async () => {
     api = await loadPreload();
   }, 30_000);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("exposes only the typed browser commands and forwards them over fixed channels", async () => {
     const attachRequest = {

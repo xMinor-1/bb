@@ -59,6 +59,8 @@ describe("loadRemoteServerPage", () => {
     const view = harness.shownErrors[0];
     expect(view?.title).toBe("Could not reach this bb server");
     expect(view?.details).toContain("http://bb-host.tailnet.ts.net:38886");
+    expect(view?.canRetry).toBe(true);
+    expect(view?.details).toContain("try again");
     expect(view?.details).toContain("Window ▸ Server");
     expect(view?.details).toContain("This Mac");
     expect(view?.details).not.toContain("rejectAndCleanup");

@@ -35,6 +35,10 @@ import {
   type BbDesktopWindowStateChangeHandler,
 } from "@bb/desktop-contract";
 import {
+  BB_DESKTOP_LOCAL_VIEW_ACTION_CHANNEL,
+  LOCAL_VIEW_RETRY_ACTION,
+} from "./local-view-ipc.js";
+import {
   BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
   BB_DESKTOP_GET_INFO_CHANNEL,
   BB_DESKTOP_INFO_CHANGED_CHANNEL,
@@ -530,5 +534,17 @@ ipcRenderer.on(
 
 void invokeDesktopInfo(BB_DESKTOP_GET_INFO_CHANNEL);
 void invokeDesktopWindowState();
+
+window.addEventListener("DOMContentLoaded", () => {
+  document
+    .querySelector<HTMLButtonElement>(
+      `button[data-local-view-action="${LOCAL_VIEW_RETRY_ACTION}"]`,
+    )
+    ?.addEventListener("click", () => {
+      ipcRenderer.send(BB_DESKTOP_LOCAL_VIEW_ACTION_CHANNEL, {
+        action: LOCAL_VIEW_RETRY_ACTION,
+      });
+    });
+});
 
 contextBridge.exposeInMainWorld("bbDesktop", bbDesktopApi);

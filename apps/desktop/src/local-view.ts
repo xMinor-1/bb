@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { escapeHtmlText } from "@bb/domain";
+import { LOCAL_VIEW_RETRY_ACTION } from "./local-view-ipc.js";
 
 export type LocalViewModel =
   | InfoViewModel
@@ -19,6 +20,7 @@ interface InfoViewModel {
 }
 
 interface StartupErrorViewModel {
+  canRetry: boolean;
   details: string;
   kind: "error";
   logText: string;
@@ -56,10 +58,14 @@ function renderErrorView(viewModel: StartupErrorViewModel): string {
   const logText = formatPlainLogText(viewModel.logText);
   const logs =
     logText.trim().length > 0 ? `<pre>${escapeHtmlText(logText)}</pre>` : "";
+  const actions = viewModel.canRetry
+    ? `<div class="actions"><button type="button" data-local-view-action="${LOCAL_VIEW_RETRY_ACTION}" data-testid="bb-local-view-retry">Try again</button></div>`
+    : "";
   return `
     <main class="shell shell-error">
       <h1>${escapeHtmlText(viewModel.title)}</h1>
       <p>${escapeHtmlText(viewModel.details)}</p>
+      ${actions}
       ${logs}
     </main>
   `;
@@ -145,6 +151,23 @@ function renderLocalView(viewModel: LocalViewModel): string {
       font-size: 14px;
       line-height: 1.5;
       margin: 0;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin: 18px 0 0;
+    }
+
+    .actions button {
+      background: AccentColor;
+      border: 1px solid AccentColor;
+      border-radius: 6px;
+      color: AccentColorText;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      padding: 6px 16px;
     }
 
     pre {
