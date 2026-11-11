@@ -85,6 +85,18 @@ provider, and directive are all Docs.
   ::docs{vault="personal" path="plans/release-plan.md" title="Release plan"}
   ```
 
+- **Review comments:** select text in a Markdown document in the Docs panel or
+  a document tab and press Comment (or Mod+Alt+M) to leave a comment on that
+  passage. Commented passages are highlighted in the editor, and the Comments
+  column lists each comment with its status: Draft, Sent, Answered, or
+  Resolved. Send to this thread (in a document tab) hands every open comment to
+  the thread's agent in one message; Send to new thread opens the new-thread
+  composer with the same message. The agent closes each comment with a note or
+  answers it, and you reply in the comment's thread, which reopens it for the
+  next send. Comments follow file and folder moves made through Docs and are
+  removed with their document or vault. A comment whose text was edited away
+  stays in the list as Text changed.
+
 ## Agent skill
 
 The plugin ships `skills/docs/SKILL.md`. Installed agents are taught to use the
@@ -179,6 +191,26 @@ The legacy `write`, `mkdir`, `move`, and `remove` CLI commands remain for one
 backward-compatibility window and emit a deprecation warning. New agent
 workflows must use pull/edit/push. UI/RPC editing remains supported and keeps
 its existing compare-and-swap behavior.
+
+### Review comments
+
+```sh
+bb docs comments plan.md --vault personal --json
+bb docs comment-add plan.md --vault personal --quote "ship it" --body "Say which Friday."
+bb docs comments-send plan.md --vault personal --thread thr_abc123
+bb docs comment-reply cmt_0123456789ab --note "Which month?"
+bb docs comment-resolve cmt_0123456789ab --note "Set it to Friday, March 14."
+```
+
+A comment is anchored by its quoted text plus up to 32 characters of context
+on each side, measured in the editor's plain text, so it survives edits
+elsewhere in the document. `comment-add` requires the quote to appear verbatim
+in the file. A comment is open while it is a draft or has an unsent reply;
+`comments-send` sends every open comment and marks them sent. `comment-reply`
+and `comment-resolve` are the agent's answers and only apply to sent comments.
+The RPC equivalents are `listComments`, `addComment`, `replyToComment`,
+`answerComment`, `reopenComment`, `deleteComment`, and `handOffComments`
+(`threadId: null` returns the message without sending it).
 
 ## Token-authenticated HTTP API
 

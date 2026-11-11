@@ -1,6 +1,12 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { proposalSchema } from "./proposals.js";
+import {
+  commentAnchorSchema,
+  commentBodySchema,
+  commentSchema,
+  commentsTag,
+} from "./comments.js";
 
 export const MAX_TREE_ENTRIES = 5_000;
 
@@ -189,7 +195,70 @@ export const syncDeleteSchema = z
 export type Vault = z.infer<typeof vaultSchema>;
 export type OpenerSource = z.infer<typeof openerSourceSchema>;
 
+const commentIdSchema = z.object({ id: z.string().min(1) }).strict();
+
 export const docsRpcContract = defineRpcContract({
+  listComments: {
+    input: z.object({ vaultId: vaultIdSchema, path: vaultPathSchema }).strict(),
+    output: z
+      .object({
+        vaultId: z.string().min(1),
+        path: z.string().min(1),
+        comments: z.array(commentSchema),
+      })
+      .strict(),
+    tags: (_input, output) => [
+      commentsTag(output.vaultId, output.path),
+      ...documentTags(output.vaultId, output.path),
+    ],
+  },
+  addComment: {
+    input: z
+      .object({
+        vaultId: vaultIdSchema,
+        path: vaultPathSchema,
+        anchor: commentAnchorSchema,
+        body: commentBodySchema,
+      })
+      .strict(),
+    output: commentSchema,
+  },
+  replyToComment: {
+    input: z
+      .object({ id: z.string().min(1), body: commentBodySchema })
+      .strict(),
+    output: commentSchema,
+  },
+  answerComment: {
+    input: z
+      .object({
+        id: z.string().min(1),
+        outcome: z.enum(["replied", "resolved"]),
+        note: commentBodySchema,
+      })
+      .strict(),
+    output: commentSchema,
+  },
+  reopenComment: {
+    input: commentIdSchema,
+    output: commentSchema,
+  },
+  deleteComment: {
+    input: commentIdSchema,
+    output: okResultSchema,
+  },
+  handOffComments: {
+    input: z
+      .object({
+        vaultId: vaultIdSchema,
+        path: vaultPathSchema,
+        threadId: z.string().min(1).nullable(),
+      })
+      .strict(),
+    output: z
+      .object({ prompt: z.string().min(1), sent: z.array(commentSchema) })
+      .strict(),
+  },
   readProposal: {
     input: z.object({ vaultId: vaultIdSchema, path: vaultPathSchema }).strict(),
     output: proposalSchema.nullable(),

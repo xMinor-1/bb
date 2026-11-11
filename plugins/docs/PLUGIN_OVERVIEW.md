@@ -10,10 +10,13 @@ Collaborate with agents on editing Markdown docs inline. Edit directly inside th
 - Open documents update live when an agent, the CLI, another window, or another editor changes them. If a change lands while you are typing, your text is kept and you choose to keep yours or take theirs.
 - Editable document cards in agent replies. Edit Markdown directly in the timeline or open the same document in a tab, with shared autosave.
 - Review agent proposals with live diffs. Edit the proposed text, accept or reject it, undo or redo, or ask the agent for changes through a document mention.
+- Comment on passages of a document, then send every open comment to an agent in one message, in the current thread or a new one. The agent closes each comment with a note or asks in its thread, and you answer there.
 - Copy the current draft from the header. Progress appears during saves and proposal actions, and recent documents stay visible when returning to a thread.
 
 ## For agents
 
 Agents get the `docs` skill and the `bb docs` command. They list vaults with `bb docs vaults` and read files with `bb docs read`. They edit with `bb docs pull`, `bb docs status`, and `bb docs push`. Push uses version checks, so a concurrent edit is reported as a conflict instead of being overwritten.
+
+Agents answer review comments with `bb docs comment-resolve` and `bb docs comment-reply`.
 
 Agents can propose changes with `bb docs propose` without replacing the saved document. Proposal updates and approval actions check versions to protect concurrent edits.

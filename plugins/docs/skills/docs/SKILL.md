@@ -135,3 +135,31 @@ bb docs accept|reject|undo|redo <path> --version N [--vault <id>] [--json]
 `proposal-update` replaces only the pending candidate. The resolution commands
 perform the same actions as the card's buttons. Existing pull/edit/push remains available for direct
 changes the user requested without proposal review.
+
+## Review comments
+
+The user can comment on passages of a Markdown document in Docs and send the
+open comments to an agent in one message that starts with `Review comments on
+the Docs document`. Each comment arrives as `[<id>] #<n>, line <line>:
+«<quoted text>»`, followed by the request. Line numbers are approximate; find
+each place by its quoted text. Lines starting with `>` quote the comment's
+earlier thread, and `User's new reply:` is what to act on now.
+
+Change the document the way the user asked for, with pull/edit/push or a
+proposal, then report on every comment you were given:
+
+```sh
+bb docs comment-resolve <id> --note "what changed"
+bb docs comment-reply <id> --note "question or reason"
+```
+
+Resolve a comment only once the change is made. Reply instead when you need
+an answer first or cannot apply it; the user answers in the comment's thread
+and sends it again. Keep notes to one line. `bb docs comments <path> --vault
+<id> --json` lists a document's comments and their threads. Do not add,
+delete, or send comments unless the user asks you to.
+
+```sh
+bb docs comment-add <path> --quote <exact text> --body <request> [--vault <id>] [--json]
+bb docs comments-send <path> --thread <thread-id> [--vault <id>] [--json]
+```

@@ -30,6 +30,16 @@ import {
 } from "@tiptap/pm/model";
 import { createProposalDiff, proposalDiffKey } from "./proposal-diff.js";
 import {
+  commentHighlightsKey,
+  commentRange,
+  createCommentHighlights,
+  selectionAnchor,
+} from "./comment-highlights.js";
+import {
+  DocumentComments,
+  type EditorCommenting,
+} from "./document-comments.js";
+import {
   documentSession,
   useDocumentSession,
   type DocumentSession,
@@ -398,6 +408,8 @@ const EDITOR_CSS = `
 .bb-simple-notes-editor .tiptap ul[data-type="taskList"] li[data-checked="true"] > div { color: var(--muted-foreground); text-decoration: line-through; }
 .bb-simple-notes-editor .tiptap p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; height: 0; pointer-events: none; color: var(--muted-foreground); }
 .bb-simple-notes-editor .tiptap ::selection { background: color-mix(in oklab, var(--primary) 22%, transparent); }
+.bb-simple-notes-editor .tiptap .bb-docs-comment { background: color-mix(in oklab, var(--attention) 18%, transparent); border-bottom: 2px solid color-mix(in oklab, var(--attention) 55%, transparent); cursor: pointer; }
+.bb-simple-notes-editor .tiptap .bb-docs-comment-active { background: color-mix(in oklab, var(--attention) 36%, transparent); border-bottom-color: var(--attention); }
 .simple-html-embed { margin:1.5em 0 0; overflow:hidden; border:1px solid var(--border); border-radius:var(--radius); background:var(--background); }
 .simple-html-embed-header { border-bottom:1px solid var(--border); background:var(--muted); padding:.45rem .7rem; color:var(--muted-foreground); font:11px var(--font-mono,monospace); }
 .simple-html-embed iframe { display:block; width:100%; border:0; background:white; }
@@ -442,6 +454,7 @@ function TiptapEditor(props: {
   inline?: boolean;
   disabled?: boolean;
   active?: boolean;
+  commenting?: EditorCommenting;
 }) {
   const {
     previewBaseUrl,
@@ -451,6 +464,7 @@ function TiptapEditor(props: {
     inline = false,
     disabled = false,
     active = true,
+    commenting,
   } = props;
   const rootRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<Editor | null>(null);
@@ -518,6 +532,11 @@ function TiptapEditor(props: {
       extensions: [
         StarterKit,
         createProposalDiff({ getBaseDocument: () => baselineRef.current }),
+        createCommentHighlights({
+          onActivate: (id) => latest.current.commenting?.onActivateComment(id),
+          onComment: () =>
+            latest.current.commenting?.onCommentShortcut() ?? false,
+        }),
         Link.configure({ openOnClick: false, autolink: true }),
         Image.configure({ allowBase64: false }),
         TightTaskList,
@@ -595,6 +614,16 @@ function TiptapEditor(props: {
     serializeRef.current = getMarkdown;
     serializeBlockRef.current = serializeNodes;
     editor.on("update", () => latest.current.onMarkdownChange(getMarkdown()));
+    editor.on("selectionUpdate", () =>
+      latest.current.commenting?.onSelectionAnchor(
+        selectionAnchor(editor.state),
+      ),
+    );
+    editor.on("transaction", () =>
+      latest.current.commenting?.onLocatedComments(
+        new Set(commentHighlightsKey.getState(editor.state)?.ranges.keys()),
+      ),
+    );
     return () => {
       editor.destroy();
       editorRef.current = null;
@@ -637,6 +666,32 @@ function TiptapEditor(props: {
   useEffect(() => {
     editorRef.current?.setEditable(!disabled, false);
   }, [disabled]);
+  const highlights = commenting?.comments;
+  const activeCommentId = commenting?.activeCommentId ?? null;
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !highlights) return;
+    editor.view.dispatch(
+      editor.state.tr.setMeta(commentHighlightsKey, { highlights }),
+    );
+  }, [highlights, inline]);
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.view.dispatch(
+      editor.state.tr.setMeta(commentHighlightsKey, {
+        activeId: activeCommentId,
+      }),
+    );
+    const range =
+      activeCommentId === null
+        ? null
+        : commentRange(editor.state, activeCommentId);
+    if (!range) return;
+    const { node } = editor.view.domAtPos(range.from);
+    const element = node instanceof Element ? node : node.parentElement;
+    element?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [activeCommentId, inline]);
   useEffect(() => {
     if (active && !inline) editorRef.current?.commands.focus("end");
   }, [active, inline]);
@@ -1001,10 +1056,12 @@ function InlineDocument({
   document,
   openInTab,
   panel = false,
+  threadId = null,
 }: {
   document: DocumentRef;
   openInTab?(title: string): void;
   panel?: boolean;
+  threadId?: string | null;
 }) {
   const { state, session } = useVaultDocument(document.vaultId, document.path, {
     showsProposals: true,
@@ -1069,12 +1126,79 @@ function InlineDocument({
       setAsking(false);
     }
   };
+  const editor = (commenting?: EditorCommenting) => (
+    <TiptapEditor
+      value={state.draft}
+      baseMarkdown={pending?.baseContent ?? null}
+      inline
+      disabled={state.busy || state.missing || truncated}
+      previewBaseUrl={state.base?.previewBaseUrl ?? ""}
+      notePath={state.path}
+      onMarkdownChange={session.edit}
+      commenting={commenting}
+      onUpload={async (file) => {
+        const result = await rpc.call("uploadAttachment", {
+          vaultId: document.vaultId,
+          notePath: state.path,
+          name: file.name,
+          content: await fileToBase64(file),
+        });
+        return { markdownPath: result.markdownPath };
+      }}
+    />
+  );
   const baseMetadata = pending
     ? parseMarkdownDocument(pending.baseContent).frontmatter
     : "";
   const candidateMetadata = pending
     ? parseMarkdownDocument(state.draft).frontmatter
     : "";
+  const body = (commenting?: EditorCommenting) => (
+    <div
+      className={panel ? "relative min-h-0 flex-1 overflow-y-auto" : "relative"}
+      style={openInTab ? { maxHeight: 400, overflow: "clip" } : undefined}
+    >
+      {!state.loaded ? (
+        state.missing || state.error ? null : (
+          <DocumentSkeleton />
+        )
+      ) : (
+        <>
+          <div
+            ref={contentRef}
+            className={panel ? "flex min-h-full min-w-0 flex-col" : "min-w-0"}
+          >
+            {pending && baseMetadata !== candidateMetadata && (
+              <div className="px-6 pt-4 text-xs">
+                <p className="mb-2 font-medium">Document metadata</p>
+                {baseMetadata && (
+                  <pre className="whitespace-pre-wrap bg-diff-removed/10 text-diff-removed">
+                    <del>{baseMetadata}</del>
+                  </pre>
+                )}
+                {candidateMetadata && (
+                  <pre className="whitespace-pre-wrap bg-diff-added/10 text-diff-added">
+                    {candidateMetadata}
+                  </pre>
+                )}
+              </div>
+            )}
+            {editor(commenting)}
+          </div>
+          {truncated && openInTab && (
+            <button
+              type="button"
+              aria-label={`Open ${title} in tab`}
+              className="absolute inset-0 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              onClick={() => openInTab(title)}
+            >
+              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-background via-background/95 to-transparent" />
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
   return (
     <TooltipProvider delayDuration={200}>
       <section
@@ -1189,71 +1313,18 @@ function InlineDocument({
             This document changed. Ask for an updated proposal before accepting.
           </p>
         )}
-        <div
-          className={
-            panel ? "relative min-h-0 flex-1 overflow-y-auto" : "relative"
-          }
-          style={openInTab ? { maxHeight: 400, overflow: "clip" } : undefined}
-        >
-          {!state.loaded ? (
-            state.missing || state.error ? null : (
-              <DocumentSkeleton />
-            )
-          ) : (
-            <>
-              <div
-                ref={contentRef}
-                className={
-                  panel ? "flex min-h-full min-w-0 flex-col" : "min-w-0"
-                }
-              >
-                {pending && baseMetadata !== candidateMetadata && (
-                  <div className="px-6 pt-4 text-xs">
-                    <p className="mb-2 font-medium">Document metadata</p>
-                    {baseMetadata && (
-                      <pre className="whitespace-pre-wrap bg-diff-removed/10 text-diff-removed">
-                        <del>{baseMetadata}</del>
-                      </pre>
-                    )}
-                    {candidateMetadata && (
-                      <pre className="whitespace-pre-wrap bg-diff-added/10 text-diff-added">
-                        {candidateMetadata}
-                      </pre>
-                    )}
-                  </div>
-                )}
-                <TiptapEditor
-                  value={state.draft}
-                  baseMarkdown={pending?.baseContent ?? null}
-                  inline
-                  disabled={state.busy || state.missing || truncated}
-                  previewBaseUrl={state.base?.previewBaseUrl ?? ""}
-                  notePath={state.path}
-                  onMarkdownChange={session.edit}
-                  onUpload={async (file) => {
-                    const result = await rpc.call("uploadAttachment", {
-                      vaultId: document.vaultId,
-                      notePath: state.path,
-                      name: file.name,
-                      content: await fileToBase64(file),
-                    });
-                    return { markdownPath: result.markdownPath };
-                  }}
-                />
-              </div>
-              {truncated && openInTab && (
-                <button
-                  type="button"
-                  aria-label={`Open ${title} in tab`}
-                  className="absolute inset-0 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
-                  onClick={() => openInTab(title)}
-                >
-                  <span className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-background via-background/95 to-transparent" />
-                </button>
-              )}
-            </>
-          )}
-        </div>
+        {panel && state.loaded ? (
+          <DocumentComments
+            vaultId={document.vaultId}
+            path={state.path}
+            threadId={threadId}
+            beforeSend={() => session.flush()}
+          >
+            {(commenting) => body(commenting)}
+          </DocumentComments>
+        ) : (
+          body()
+        )}
       </section>
     </TooltipProvider>
   );
@@ -1386,12 +1457,12 @@ function DocumentPicker() {
   );
 }
 
-function DocumentPanel({ params }: ExperimentalThreadActionTabProps) {
+function DocumentPanel({ params, threadId }: ExperimentalThreadActionTabProps) {
   const document = parseDocumentRef(params);
   const navigate = useBbNavigate();
   if (!document) return <DocumentPicker />;
   if (!/\.html?$/i.test(document.path))
-    return <InlineDocument document={document} panel />;
+    return <InlineDocument document={document} panel threadId={threadId} />;
   return (
     <div className="flex h-full min-h-0 flex-col">
       <TooltipProvider delayDuration={200}>
@@ -1423,6 +1494,7 @@ function SavedDocumentEditor({
   onSaveCopy,
   errorHint = "",
   active = true,
+  commentsVaultId = null,
 }: {
   state: DocumentState;
   session: DocumentSession;
@@ -1430,6 +1502,7 @@ function SavedDocumentEditor({
   onSaveCopy?(): void;
   errorHint?: string;
   active?: boolean;
+  commentsVaultId?: string | null;
 }) {
   if (!state.loaded)
     return state.missing ? (
@@ -1451,15 +1524,37 @@ function SavedDocumentEditor({
         session={session}
         onSaveCopy={onSaveCopy}
       />
-      <TiptapEditor
-        value={state.draft}
-        active={active}
-        disabled={state.busy || state.missing}
-        previewBaseUrl={state.base?.previewBaseUrl ?? ""}
-        notePath={state.base?.previewPath ?? state.path}
-        onUpload={onUpload}
-        onMarkdownChange={session.edit}
-      />
+      {commentsVaultId === null ? (
+        <TiptapEditor
+          value={state.draft}
+          active={active}
+          disabled={state.busy || state.missing}
+          previewBaseUrl={state.base?.previewBaseUrl ?? ""}
+          notePath={state.base?.previewPath ?? state.path}
+          onUpload={onUpload}
+          onMarkdownChange={session.edit}
+        />
+      ) : (
+        <DocumentComments
+          vaultId={commentsVaultId}
+          path={state.path}
+          threadId={null}
+          beforeSend={() => session.flush()}
+        >
+          {(commenting) => (
+            <TiptapEditor
+              value={state.draft}
+              active={active}
+              disabled={state.busy || state.missing}
+              previewBaseUrl={state.base?.previewBaseUrl ?? ""}
+              notePath={state.base?.previewPath ?? state.path}
+              onUpload={onUpload}
+              onMarkdownChange={session.edit}
+              commenting={commenting}
+            />
+          )}
+        </DocumentComments>
+      )}
     </div>
   );
 }
@@ -1508,6 +1603,7 @@ function NotePane({
       state={state}
       session={session}
       active={active}
+      commentsVaultId={/\.md$/i.test(state.path) ? vaultId : null}
       onSaveCopy={() =>
         void saveCopy().then((created) => {
           if (created !== null) onOpen(created);

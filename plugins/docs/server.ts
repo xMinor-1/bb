@@ -6,6 +6,16 @@ import {
   experimental_getRelativeHostPath as getRelativeHostPath,
 } from "@get-bb/plugin-sdk";
 import { proposalSchema, type Proposal } from "./proposals.js";
+import { randomBytes } from "node:crypto";
+import {
+  buildCommentHandoff,
+  commentIsOpen,
+  commentSchema,
+  commentsTag,
+  findQuote,
+  formatComments,
+  type DocsComment,
+} from "./comments.js";
 import os from "node:os";
 import path from "node:path";
 import { isRecord, parseMarkdownDocument } from "./markdown-document.js";
@@ -374,6 +384,14 @@ export default async function plugin(
       data TEXT NOT NULL,
       PRIMARY KEY (vault_id, path)
     )`,
+    `CREATE TABLE IF NOT EXISTS comments (
+      id TEXT PRIMARY KEY,
+      vault_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      data TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS comments_document ON comments (vault_id, path, seq)`,
   ]);
 
   let seededDefaultVault = false;
@@ -775,6 +793,155 @@ export default async function plugin(
     return proposal;
   }
 
+  const storedCommentSchema = commentSchema.omit({
+    id: true,
+    vaultId: true,
+    path: true,
+    seq: true,
+  });
+  const commentRowSchema = z.object({
+    id: z.string(),
+    vault_id: z.string(),
+    path: z.string(),
+    seq: z.number(),
+    data: z.string(),
+  });
+
+  function parseCommentRow(row: unknown): DocsComment {
+    const parsed = commentRowSchema.parse(row);
+    return commentSchema.parse({
+      ...storedCommentSchema.parse(JSON.parse(parsed.data)),
+      id: parsed.id,
+      vaultId: parsed.vault_id,
+      path: parsed.path,
+      seq: parsed.seq,
+    });
+  }
+
+  function readComments(vaultId: string, relativePath: string): DocsComment[] {
+    return db
+      .prepare(
+        "SELECT id, vault_id, path, seq, data FROM comments WHERE vault_id = ? AND path = ? ORDER BY seq",
+      )
+      .all(vaultId, relativePath)
+      .map(parseCommentRow);
+  }
+
+  function requireComment(id: string): DocsComment {
+    const row = db
+      .prepare(
+        "SELECT id, vault_id, path, seq, data FROM comments WHERE id = ?",
+      )
+      .get(id);
+    if (!row) throw new Error(`Unknown comment: ${id}`);
+    return parseCommentRow(row);
+  }
+
+  function storeComment(comment: DocsComment): DocsComment {
+    const { id, vaultId, path: relativePath, seq, ...data } = comment;
+    db.prepare(
+      "INSERT INTO comments (id, vault_id, path, seq, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+    ).run(id, vaultId, relativePath, seq, JSON.stringify(data));
+    return comment;
+  }
+
+  function saveComments(comments: DocsComment[]): DocsComment[] {
+    db.transaction(() => comments.forEach(storeComment))();
+    invalidate(
+      comments.map((comment) => commentsTag(comment.vaultId, comment.path)),
+    );
+    return comments;
+  }
+
+  function updateComment(
+    id: string,
+    change: (comment: DocsComment, now: number) => DocsComment,
+  ): DocsComment {
+    const comment = requireComment(id);
+    const now = Date.now();
+    return saveComments([{ ...change(comment, now), updatedAt: now }])[0]!;
+  }
+
+  function addComment(
+    vaultId: string,
+    relativePath: string,
+    anchor: DocsComment["anchor"],
+    body: string,
+  ): DocsComment {
+    const now = Date.now();
+    const comment = db.transaction(() => {
+      const seq =
+        Number(
+          db
+            .prepare(
+              "SELECT COALESCE(MAX(seq), 0) FROM comments WHERE vault_id = ? AND path = ?",
+            )
+            .pluck()
+            .get(vaultId, relativePath),
+        ) + 1;
+      return storeComment({
+        id: `cmt_${randomBytes(6).toString("hex")}`,
+        vaultId,
+        path: relativePath,
+        seq,
+        anchor,
+        body,
+        status: "draft",
+        createdAt: now,
+        updatedAt: now,
+        sentAt: null,
+        sentThreadId: null,
+        thread: [],
+      });
+    })();
+    invalidate([commentsTag(vaultId, relativePath)]);
+    return comment;
+  }
+
+  function deleteComments(vaultId: string, relativePath: string) {
+    db.prepare(
+      "DELETE FROM comments WHERE vault_id = ? AND (path = ? OR substr(path, 1, length(?)) = ?)",
+    ).run(vaultId, relativePath, `${relativePath}/`, `${relativePath}/`);
+  }
+
+  async function handOffComments(
+    vaultId: string | undefined,
+    relativePath: string,
+    threadId: string | null,
+  ) {
+    const vault = getVault(vaultId);
+    const open = readComments(vault.id, relativePath).filter(commentIsOpen);
+    if (open.length === 0)
+      throw new Error("There are no open comments to send.");
+    const file = await readExistingFile(vault, relativePath);
+    const prompt = buildCommentHandoff({
+      vaultId: vault.id,
+      path: relativePath,
+      source: file?.contentEncoding === "utf8" ? file.content : null,
+      comments: open,
+    });
+    if (threadId !== null)
+      await bb.sdk.threads.send({
+        threadId,
+        mode: "queue-if-active",
+        input: [{ type: "text", text: prompt, mentions: [] }],
+      });
+    const now = Date.now();
+    const sent = saveComments(
+      open.map((comment) => ({
+        ...comment,
+        status: comment.status === "draft" ? "sent" : comment.status,
+        sentAt: now,
+        sentThreadId: threadId,
+        updatedAt: now,
+        thread: comment.thread.map((reply) =>
+          reply.sentAt === null ? { ...reply, sentAt: now } : reply,
+        ),
+      })),
+    );
+    return { prompt, sent };
+  }
+
   async function resolveOpenerFile(
     source: OpenerSource,
     pathValue: unknown,
@@ -923,6 +1090,10 @@ export default async function plugin(
         .all(vault.id, from, `${from}/`, `${from}/`);
       deleteProposals(vault.id, from);
       deleteProposals(vault.id, to);
+      deleteComments(vault.id, to);
+      db.prepare(
+        "UPDATE comments SET path = ? || substr(path, ?) WHERE vault_id = ? AND (path = ? OR substr(path, 1, length(?)) = ?)",
+      ).run(to, from.length + 1, vault.id, from, `${from}/`, `${from}/`);
       const insert = db.prepare(
         "INSERT INTO proposals (vault_id, path, data) VALUES (?, ?, ?)",
       );
@@ -965,6 +1136,7 @@ export default async function plugin(
         recursive,
       });
       deleteProposals(vault.id, relativePath);
+      deleteComments(vault.id, relativePath);
       mentionSummaries.delete(vault.id);
       treeSummaries.get(vault.id)?.delete(relativePath);
       watches.recordOwnChange(vault, [relativePath]);
@@ -1412,6 +1584,75 @@ export default async function plugin(
   }
 
   const handlers: PluginRpcHandlers<typeof docsRpcContract> = {
+    async listComments(input) {
+      const vault = getVault(input.vaultId);
+      return {
+        vaultId: vault.id,
+        path: input.path,
+        comments: readComments(vault.id, input.path),
+      };
+    },
+    async addComment(input) {
+      const vault = getVault(input.vaultId);
+      return addComment(
+        vault.id,
+        requireVaultPath(input.path, { extension: ".md" }),
+        input.anchor,
+        input.body,
+      );
+    },
+    async replyToComment(input) {
+      return updateComment(input.id, (comment, now) => ({
+        ...comment,
+        thread: [
+          ...comment.thread,
+          {
+            id: `rpl_${randomBytes(6).toString("hex")}`,
+            author: "user",
+            body: input.body,
+            outcome: null,
+            createdAt: now,
+            sentAt: null,
+          },
+        ],
+      }));
+    },
+    async answerComment(input) {
+      return updateComment(input.id, (comment, now) => {
+        if (comment.status === "draft")
+          throw new Error("This comment has not been sent to an agent yet.");
+        return {
+          ...comment,
+          status: input.outcome,
+          thread: [
+            ...comment.thread,
+            {
+              id: `rpl_${randomBytes(6).toString("hex")}`,
+              author: "agent",
+              body: input.note,
+              outcome: input.outcome,
+              createdAt: now,
+              sentAt: now,
+            },
+          ],
+        };
+      });
+    },
+    async reopenComment(input) {
+      return updateComment(input.id, (comment) => ({
+        ...comment,
+        status: "draft",
+      }));
+    },
+    async deleteComment(input) {
+      const comment = requireComment(input.id);
+      db.prepare("DELETE FROM comments WHERE id = ?").run(comment.id);
+      invalidate([commentsTag(comment.vaultId, comment.path)]);
+      return { ok: true as const };
+    },
+    async handOffComments(input) {
+      return handOffComments(input.vaultId, input.path, input.threadId);
+    },
     async readProposal(input) {
       return readProposal(getVault(input.vaultId).id, input.path);
     },
@@ -1682,6 +1923,7 @@ export default async function plugin(
           throw new Error("At least one vault is required");
         db.transaction(() => {
           db.prepare("DELETE FROM proposals WHERE vault_id = ?").run(id);
+          db.prepare("DELETE FROM comments WHERE vault_id = ?").run(id);
           db.prepare("DELETE FROM entry_order WHERE vault_id = ?").run(id);
           db.prepare("DELETE FROM vaults WHERE id = ?").run(id);
         })();
@@ -2718,6 +2960,148 @@ export default async function plugin(
     ]),
   );
 
+  const commentIdPositionals = [
+    {
+      name: "id",
+      description: "Comment ID from bb docs comments",
+      required: true,
+    },
+  ] as const;
+  const commentNoteOption = {
+    type: "string",
+    required: true,
+    description: "One-line note shown in the comment's thread",
+  } as const;
+
+  function renderComments(result: unknown, asJson: boolean): string {
+    if (asJson) return JSON.stringify(result, null, 2);
+    if (Array.isArray(result))
+      return formatComments(result.map((item) => commentSchema.parse(item)));
+    return formatComments([commentSchema.parse(result)]);
+  }
+
+  const commentCommands = {
+    comments: cliCommand({
+      summary: "List a document's review comments and their threads",
+      suggestFor: ["comment-list"],
+      positionals: proposalPositionals,
+      options: { vault: VAULT_OPTION, json: JSON_OPTION },
+      run: (input) =>
+        attemptCli(async () => {
+          const result = await handlers.listComments({
+            vaultId: input.options.vault,
+            path: requireVaultPath(input.positionals.path),
+          });
+          return {
+            exitCode: 0,
+            stdout: renderComments(result.comments, input.options.json),
+          };
+        }),
+    }),
+    "comment-add": cliCommand({
+      summary: "Add a draft comment on a quoted passage of a document",
+      positionals: proposalPositionals,
+      options: {
+        vault: VAULT_OPTION,
+        json: JSON_OPTION,
+        quote: {
+          type: "string",
+          required: true,
+          description: "Exact text of the passage, as it appears in the file",
+        },
+        body: {
+          type: "string",
+          required: true,
+          description: "What should change",
+        },
+      },
+      run: (input) =>
+        attemptCli(async () => {
+          const relativePath = requireVaultPath(input.positionals.path, {
+            extension: ".md",
+          });
+          const file = await readFile(input.options.vault, relativePath);
+          const anchor = {
+            quote: input.options.quote,
+            prefix: "",
+            suffix: "",
+          };
+          if (
+            file.contentEncoding !== "utf8" ||
+            !findQuote(file.content, anchor)
+          )
+            throw new CliUsageError(
+              "The quote does not appear in the document.",
+            );
+          const result = await handlers.addComment({
+            vaultId: input.options.vault,
+            path: relativePath,
+            anchor,
+            body: input.options.body.trim(),
+          });
+          return {
+            exitCode: 0,
+            stdout: renderComments(result, input.options.json),
+          };
+        }),
+    }),
+    ...Object.fromEntries(
+      (["reply", "resolve"] as const).map((action) => [
+        `comment-${action}`,
+        cliCommand({
+          summary:
+            action === "resolve"
+              ? "Close a sent comment with a note of what changed"
+              : "Answer a sent comment without closing it",
+          positionals: commentIdPositionals,
+          options: { note: commentNoteOption, json: JSON_OPTION },
+          run: (input) =>
+            attemptCli(async () => {
+              const note = input.options.note.trim();
+              if (!note) throw new CliUsageError("The note must not be empty.");
+              const result = await handlers.answerComment({
+                id: input.positionals.id,
+                outcome: action === "resolve" ? "resolved" : "replied",
+                note,
+              });
+              return {
+                exitCode: 0,
+                stdout: renderComments(result, input.options.json),
+              };
+            }),
+        }),
+      ]),
+    ),
+    "comments-send": cliCommand({
+      summary: "Send a document's open comments to a thread in one message",
+      positionals: proposalPositionals,
+      options: {
+        vault: VAULT_OPTION,
+        json: JSON_OPTION,
+        thread: {
+          type: "string",
+          required: true,
+          placeholder: "id",
+          description: "Thread that receives the comments",
+        },
+      },
+      run: (input) =>
+        attemptCli(async () => {
+          const result = await handlers.handOffComments({
+            vaultId: input.options.vault,
+            path: requireVaultPath(input.positionals.path),
+            threadId: input.options.thread,
+          });
+          return {
+            exitCode: 0,
+            stdout: input.options.json
+              ? JSON.stringify(result, null, 2)
+              : `Sent ${result.sent.length} comment${result.sent.length === 1 ? "" : "s"} to ${input.options.thread}.`,
+          };
+        }),
+    }),
+  };
+
   bb.cli.register(
     defineCli({
       name: "docs",
@@ -2726,6 +3110,7 @@ export default async function plugin(
       usageErrorExitCode: 2,
       commands: {
         ...proposalCommands,
+        ...commentCommands,
         proposal: cliCommand({
           summary: "Read the current proposal and its version",
           positionals: proposalPositionals,

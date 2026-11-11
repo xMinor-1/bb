@@ -2093,3 +2093,185 @@ describe("Docs live documents", () => {
     );
   });
 });
+
+describe("Docs comments", () => {
+  const content = "# Plan\n\nWe test, then ship it on Friday.";
+
+  function savedComment(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "cmt_1",
+      vaultId: "personal",
+      path: "plan.md",
+      seq: 1,
+      anchor: { quote: "ship it", prefix: "then ", suffix: " on Friday" },
+      body: "Say which Friday.",
+      status: "draft",
+      createdAt: 1,
+      updatedAt: 1,
+      sentAt: null,
+      sentThreadId: null,
+      thread: [],
+      ...overrides,
+    };
+  }
+
+  function renderPage(rpc: RenderSlotOptions["rpc"]) {
+    return renderSlot(
+      docsRegistration,
+      { subPath: "personal/plan.md" },
+      {
+        rpc: {
+          listNotes: () =>
+            listNotesResultForVault("personal", "plan.md", "Plan"),
+          readDocument: () => documentResult("plan.md", content),
+          ...rpc,
+        },
+      },
+    );
+  }
+
+  it("highlights commented text and hands the comments to a new thread", async () => {
+    const handOffComments = vi.fn(() => ({
+      prompt: "Review comments on plan.md",
+      sent: [savedComment({ status: "sent" })],
+    }));
+    const slot = renderPage({
+      listComments: () => ({
+        vaultId: "personal",
+        path: "plan.md",
+        comments: [savedComment()],
+      }),
+      handOffComments,
+    });
+    const rail = await slot.findByRole("complementary", { name: "Comments" });
+    await waitFor(() =>
+      expect(
+        slot.container.querySelector('[data-comment-id="cmt_1"]')?.textContent,
+      ).toBe("ship it"),
+    );
+    expect(rail.textContent).toContain("Say which Friday.");
+    expect(rail.textContent).not.toContain("Text changed");
+    expect(
+      slot.queryByRole("button", { name: "Send to this thread" }),
+    ).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: "Send to new thread" }));
+    await waitFor(() =>
+      expect(slot.navigateCalls).toContainEqual({
+        method: "toCompose",
+        options: {
+          initialPrompt: "Review comments on plan.md",
+          focusPrompt: true,
+        },
+      }),
+    );
+    expect(handOffComments).toHaveBeenCalledWith({
+      vaultId: "personal",
+      path: "plan.md",
+      threadId: null,
+    });
+  });
+
+  it("comments on the selected text", async () => {
+    const addComment = vi.fn((rawInput: unknown) =>
+      savedComment(rawInput as Record<string, unknown>),
+    );
+    const slot = renderPage({
+      listComments: () => ({
+        vaultId: "personal",
+        path: "plan.md",
+        comments: [],
+      }),
+      addComment,
+    });
+    const paragraph = await slot.findByText("We test, then ship it on Friday.");
+    const editor = slot.getByRole("textbox", { name: "Document content" });
+    const text = paragraph.firstChild!;
+    editor.focus();
+    window
+      .getSelection()!
+      .setBaseAndExtent(
+        text,
+        "We test, then ".length,
+        text,
+        "We test, then ship it".length,
+      );
+    document.dispatchEvent(new Event("selectionchange"));
+    fireEvent.click(await slot.findByRole("button", { name: "Comment" }));
+    fireEvent.change(slot.getByRole("textbox", { name: "New comment" }), {
+      target: { value: "Say which Friday." },
+    });
+    fireEvent.click(slot.getByRole("button", { name: "Comment" }));
+    await waitFor(() =>
+      expect(addComment).toHaveBeenCalledWith({
+        vaultId: "personal",
+        path: "plan.md",
+        anchor: {
+          quote: "ship it",
+          prefix: "Plan\nWe test, then ",
+          suffix: " on Friday.",
+        },
+        body: "Say which Friday.",
+      }),
+    );
+  });
+
+  it("sends from a thread's document tab to that thread and shows the agent's note", async () => {
+    const handOffComments = vi.fn(() => ({
+      prompt: "Review comments",
+      sent: [savedComment({ status: "sent" })],
+    }));
+    const slot = renderSlot(
+      app.threadPanelActions[0]!,
+      {
+        threadId: "thr_1",
+        environment: null,
+        params: { vaultId: "personal", path: "plan.md", title: "Plan" },
+      },
+      {
+        rpc: {
+          readDocument: () => documentResult("plan.md", content),
+          listComments: () => ({
+            vaultId: "personal",
+            path: "plan.md",
+            comments: [
+              savedComment({ id: "cmt_2", seq: 2 }),
+              savedComment({
+                status: "resolved",
+                anchor: { quote: "removed text", prefix: "", suffix: "" },
+                thread: [
+                  {
+                    id: "rpl_1",
+                    author: "agent",
+                    body: "Moved it to March 14.",
+                    outcome: "resolved",
+                    createdAt: 2,
+                    sentAt: 2,
+                  },
+                ],
+              }),
+            ],
+          }),
+          handOffComments,
+        },
+      },
+    );
+    const resolved = await slot.findByRole("listitem", { name: "Comment 1" });
+    expect(resolved.textContent).toContain(
+      "Agent resolved: Moved it to March 14.",
+    );
+    await waitFor(() => expect(resolved.textContent).toContain("Text changed"));
+    expect(slot.getByRole("button", { name: "Reopen" })).toBeTruthy();
+    expect(slot.getByText("1 comment ready to send.")).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Send to this thread" }));
+    await waitFor(() =>
+      expect(handOffComments).toHaveBeenCalledWith({
+        vaultId: "personal",
+        path: "plan.md",
+        threadId: "thr_1",
+      }),
+    );
+    expect(slot.navigateCalls).not.toContainEqual(
+      expect.objectContaining({ method: "toCompose" }),
+    );
+  });
+});

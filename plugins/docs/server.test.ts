@@ -8,6 +8,8 @@ import {
   makeHostResponse,
 } from "@get-bb/plugin-sdk/testing";
 import simpleNotes from "./server";
+import { commentSchema } from "./comments";
+import { docsRpcContract } from "./contract";
 
 const temporaryDirectories: string[] = [];
 
@@ -2008,5 +2010,242 @@ describe("Docs proposals", () => {
       version: 2,
     });
     await harness.lifecycle.dispose();
+  });
+});
+
+describe("Docs comments", () => {
+  const anchor = { quote: "ship it", prefix: "then ", suffix: " on Friday" };
+
+  async function setupComments() {
+    const host = await loadVirtualSyncVault({
+      "/vault/plan.md": {
+        content: "# Plan\n\nWe test, then ship it on Friday.\n",
+        contentEncoding: "utf8",
+        modifiedAtMs: 1,
+      },
+    });
+    const sent: unknown[] = [];
+    host.harness.sdk.stub("threads.send", async (args: unknown) => {
+      sent.push(args);
+    });
+    const comment = commentSchema.parse(
+      await host.harness.behavior.callRpc("addComment", {
+        path: "plan.md",
+        anchor,
+        body: "  Say which Friday.  ",
+      }),
+    );
+    return { ...host, comment, sent };
+  }
+
+  const list = async (
+    harness: Awaited<ReturnType<typeof setupComments>>["harness"],
+    path = "plan.md",
+  ) =>
+    docsRpcContract.listComments.output.parse(
+      await harness.behavior.callRpc("listComments", { path }),
+    ).comments;
+
+  it("hands open comments to a thread once and lets the agent close them through the CLI", async () => {
+    const { harness, comment, sent } = await setupComments();
+    expect(comment).toMatchObject({
+      seq: 1,
+      status: "draft",
+      body: "Say which Friday.",
+      vaultId: "personal",
+    });
+    await expect(
+      harness.runCli(["comment-resolve", comment.id, "--note", "Done"]),
+    ).resolves.toMatchObject({ exitCode: 1 });
+
+    const handoff = docsRpcContract.handOffComments.output.parse(
+      await harness.behavior.callRpc("handOffComments", {
+        path: "plan.md",
+        threadId: "thr_review",
+      }),
+    );
+    expect(sent).toEqual([
+      {
+        threadId: "thr_review",
+        mode: "queue-if-active",
+        input: [{ type: "text", text: handoff.prompt, mentions: [] }],
+      },
+    ]);
+    expect(handoff.prompt).toContain(
+      `[${comment.id}] #1, line 3: «ship it»\nSay which Friday.`,
+    );
+    expect(handoff.sent).toMatchObject([
+      { id: comment.id, status: "sent", sentThreadId: "thr_review" },
+    ]);
+    await expect(
+      harness.behavior.callRpc("handOffComments", {
+        path: "plan.md",
+        threadId: "thr_review",
+      }),
+    ).rejects.toThrow("There are no open comments to send.");
+
+    const replied = await harness.runCli([
+      "comment-reply",
+      comment.id,
+      "--note",
+      "Which month?",
+      "--json",
+    ]);
+    expect(replied.exitCode).toBe(0);
+    expect(JSON.parse(replied.stdout!)).toMatchObject({ status: "replied" });
+
+    await harness.behavior.callRpc("replyToComment", {
+      id: comment.id,
+      body: "March.",
+    });
+    const followUp = docsRpcContract.handOffComments.output.parse(
+      await harness.behavior.callRpc("handOffComments", {
+        path: "plan.md",
+        threadId: null,
+      }),
+    );
+    expect(sent).toHaveLength(1);
+    expect(followUp.prompt).toContain(
+      "> Agent: Which month?\nUser's new reply: March.",
+    );
+    expect(followUp.sent[0]).toMatchObject({
+      status: "replied",
+      sentThreadId: null,
+    });
+    expect(
+      followUp.sent[0]!.thread.every((reply) => reply.sentAt !== null),
+    ).toBe(true);
+
+    const resolved = await harness.runCli([
+      "comment-resolve",
+      comment.id,
+      "--note",
+      "Set it to Friday, March 14.",
+    ]);
+    expect(resolved.stdout).toContain("(resolved)");
+    expect(await list(harness)).toMatchObject([
+      {
+        status: "resolved",
+        thread: [
+          { author: "agent", outcome: "replied" },
+          { author: "user", body: "March." },
+          { author: "agent", outcome: "resolved" },
+        ],
+      },
+    ]);
+    const listed = await harness.runCli(["comments", "plan.md"]);
+    expect(listed.stdout).toContain(`#1 ${comment.id} (resolved): «ship it»`);
+    await harness.lifecycle.dispose();
+  });
+
+  it("adds comments from the CLI only on text the document contains", async () => {
+    const { harness } = await setupComments();
+    await expect(
+      harness.runCli([
+        "comment-add",
+        "plan.md",
+        "--quote",
+        "launch day",
+        "--body",
+        "Name it.",
+      ]),
+    ).resolves.toMatchObject({ exitCode: 2 });
+    const added = await harness.runCli([
+      "comment-add",
+      "plan.md",
+      "--quote",
+      "We test",
+      "--body",
+      "Which tests?",
+      "--json",
+    ]);
+    expect(JSON.parse(added.stdout!)).toMatchObject({
+      seq: 2,
+      status: "draft",
+      anchor: { quote: "We test", prefix: "", suffix: "" },
+    });
+    const sent = await harness.runCli([
+      "comments-send",
+      "plan.md",
+      "--thread",
+      "thr_cli",
+    ]);
+    expect(sent.stdout).toBe("Sent 2 comments to thr_cli.");
+    await harness.lifecycle.dispose();
+  });
+
+  it("moves comments with files and folders and clears them with the file or vault", async () => {
+    const { harness, setUtf8 } = await setupComments();
+    await harness.behavior.callRpc("movePath", {
+      from: "plan.md",
+      to: "drafts/plan.md",
+    });
+    expect(await list(harness)).toEqual([]);
+    expect(await list(harness, "drafts/plan.md")).toMatchObject([
+      { path: "drafts/plan.md", seq: 1 },
+    ]);
+    await harness.behavior.callRpc("movePath", {
+      from: "drafts",
+      to: "archive",
+    });
+    const [moved] = await list(harness, "archive/plan.md");
+    expect(moved).toMatchObject({ path: "archive/plan.md" });
+    await harness.behavior.callRpc("deletePath", {
+      path: "archive",
+      recursive: true,
+    });
+    setUtf8("/vault/archive/plan.md", "Unrelated document");
+    expect(await list(harness, "archive/plan.md")).toEqual([]);
+    await expect(
+      harness.behavior.callRpc("deleteComment", { id: moved!.id }),
+    ).rejects.toThrow("Unknown comment");
+
+    await harness.behavior.callRpc("addComment", {
+      path: "plan.md",
+      anchor,
+      body: "Again",
+    });
+    await harness.behavior.callRpc("createVault", {
+      name: "Other",
+      rootPath: "/other",
+    });
+    await harness.behavior.callRpc("removeVault", { vaultId: "personal" });
+    await harness.behavior.callRpc("createVault", {
+      name: "Personal",
+      rootPath: "/replacement",
+    });
+    expect(
+      await harness.behavior.callRpc("listComments", {
+        vaultId: "personal",
+        path: "plan.md",
+      }),
+    ).toMatchObject({ comments: [] });
+    await harness.lifecycle.dispose();
+  });
+
+  it("keeps comments across a reload and reopens resolved ones as drafts", async () => {
+    const { harness, comment } = await setupComments();
+    await harness.behavior.callRpc("handOffComments", {
+      path: "plan.md",
+      threadId: "thr_review",
+    });
+    await harness.behavior.callRpc("answerComment", {
+      id: comment.id,
+      outcome: "resolved",
+      note: "Done",
+    });
+    const reloaded = await harness.lifecycle.reload(simpleNotes);
+    const reopened = await reloaded.harness.behavior.callRpc("reopenComment", {
+      id: comment.id,
+    });
+    expect(reopened).toMatchObject({
+      status: "draft",
+      thread: [{ body: "Done" }],
+    });
+    await expect(
+      reloaded.harness.behavior.callRpc("deleteComment", { id: comment.id }),
+    ).resolves.toEqual({ ok: true });
+    expect(await list(reloaded.harness)).toEqual([]);
+    await reloaded.harness.lifecycle.dispose();
   });
 });
