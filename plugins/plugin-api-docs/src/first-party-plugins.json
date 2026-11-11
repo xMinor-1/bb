@@ -205,6 +205,11 @@
     "icon": "FileText"
   },
   {
+    "id": "bb--file-manager",
+    "name": "File Manager",
+    "icon": "FolderOpen"
+  },
+  {
     "id": "theme-preview",
     "name": "Theme Preview",
     "icon": "Palette"

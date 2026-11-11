@@ -25,6 +25,7 @@
     "bb-plugin-environment-modal-sandbox": "workspace:*",
     "bb-plugin-environment-personal-workspace": "workspace:*",
     "bb-plugin-environment-project-checkout": "workspace:*",
+    "bb-plugin-bb--file-manager": "workspace:*",
     "bb-plugin-github": "workspace:*",
     "bb-plugin-bb--github-star": "workspace:*",
     "bb-plugin-bb--git": "workspace:*",

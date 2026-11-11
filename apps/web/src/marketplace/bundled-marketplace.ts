@@ -22,6 +22,7 @@ export const INSTALL_ON_REQUEST_BUNDLED_PLUGINS: ReadonlySet<string> = new Set([
   "browser-automation",
   "docs",
   "environment-modal-sandbox",
+  "file-manager",
   "github",
   "memory",
   "tasks",

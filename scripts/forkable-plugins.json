@@ -15,6 +15,7 @@
     "plugins/drafts",
     "plugins/environment-modal-sandbox",
     "plugins/environment-personal-workspace",
+    "plugins/file-manager",
     "plugins/github",
     "plugins/github-star",
     "plugins/inline-vis",
